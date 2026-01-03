@@ -1,0 +1,7 @@
+playwright
+pytest
+pytest-playwright
+customtkinter
+packaging
+requests
+playwright-stealth

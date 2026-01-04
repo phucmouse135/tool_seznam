@@ -1,63 +1,60 @@
-# Automation Tool (Playwright + Python + CustomTkinter)
+# Automation Tool
 
-Đây là cấu trúc dự án mẫu cho một công cụ automation sử dụng Playwright với giao diện người dùng (UI) được xây dựng bằng CustomTkinter.
+## Introduction
+This project is a robust automation tool built using Python and Playwright. It is designed to execute multi-threaded browser automation tasks efficiently, featuring built-in proxy management, retry mechanisms, and integration with SMS verification services (OnlineSim).
 
-## Cấu trúc dự án
+## Folder Overview
+- **`app/`**: Contains the core application logic and modules.
+- **`data/`**: Directory for input and output data.
+  - `input.txt`: Place your input data here (e.g., account credentials).
+  - `success.txt`: Records successfully processed items.
+  - `failed.txt`: Records items that failed processing.
+- **`logs/`**: Stores runtime logs for monitoring and debugging.
+- **`reports/`**: Generated reports from automation sessions.
+- **`storage/`**: Used for persistent storage, such as browser contexts or cookies.
+- **`utils.py`**: Utility helper classes for Logging, Proxy management, Browser control, and File operations.
+- **`config.py`**: Central configuration file for the application.
+- **`main.py`**: The main entry point script that orchestrates the worker threads.
 
-```
-automation-tool/
-├── app/
-│   ├── core/
-│   │   ├── pages/          # Page Object Model (POM) classes
-│   │   └── tests/          # Test scripts / logic automation
-│   └── ui/                 # Các thành phần UI (nếu cần tách nhỏ)
-├── config/                 # Cấu hình (settings, env vars)
-├── logs/                   # Logs file
-├── reports/                # Kết quả test (html report, screenshots)
-├── utils/                  # Các hàm tiện ích (logger, helpers)
-├── main.py                 # Entry point (chạy UI)
-├── requirements.txt        # Các thư viện cần thiết
-└── .env                    # Biến môi trường
-```
+## How to Run
 
-## Cài đặt
+### Prerequisites
+- Python 3.12 or higher
+- Google Chrome (optional, Playwright installs its own binaries)
 
-1.  **Tạo môi trường ảo (khuyên dùng):**
-    ```bash
-    python -m venv venv
-    # Windows
-    venv\Scripts\activate
-    # macOS/Linux
-    source venv/bin/activate
-    ```
+### Installation
 
-2.  **Cài đặt thư viện:**
+1.  **Clone the repository** (if applicable) or navigate to the project folder.
+
+2.  **Install Python dependencies**:
     ```bash
     pip install -r requirements.txt
     ```
 
-3.  **Cài đặt trình duyệt Playwright:**
+3.  **Install Playwright browsers**:
     ```bash
-    playwright install
+    playwright install chromium
     ```
 
-## Cấu hình
+### Configuration
 
-Chỉnh sửa file `.env` để thay đổi các cấu hình cơ bản:
-- `BASE_URL`: Trang web cần test.
-- `HEADLESS`: Chạy ẩn (True) hoặc hiện trình duyệt (False).
-- `BROWSER`: Loại trình duyệt (chromium, firefox, webkit).
+1.  **Environment Variables**:
+    Create a `.env` file in the root directory. You can refer to `config.py` to see which variables are used (e.g., Proxy API URLs, API Keys).
 
-## Chạy ứng dụng
+2.  **Input Data**:
+    Prepare your data in `data/input.txt`. The expected format is typically:
+    ```text
+    username|password
+    ```
 
-Chạy file `main.py` để mở giao diện điều khiển:
+### Usage
 
+**Run the main automation worker:**
 ```bash
 python main.py
 ```
 
-## Phát triển thêm
-
-- **Thêm Page mới:** Tạo file mới trong `app/core/pages/` kế thừa từ `BasePage`.
-- **Thêm Test case:** Tạo function hoặc class trong `app/core/tests/` sử dụng các Page Object.
-- **Mở rộng UI:** Chỉnh sửa `main.py` hoặc thêm các module trong `app/ui/`.
+**Fetch OnlineSim tariffs:**
+```bash
+python get_tariffs_to_json.py
+```

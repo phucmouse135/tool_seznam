@@ -36,6 +36,7 @@ async def worker(thread_id, port, semaphore, data_chunk):
                 username = auth[0]  # Giả sử item là username
                 password = auth[1] if len(auth) > 1 else "DefaultPass123!"
                 phone_number = ""
+                failed_reason = ""
                 Logger.info(thread_id, f"▶️ Đang xử lý: {username}")
                 isOk = False
 
@@ -114,6 +115,13 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         await page.wait_for_load_state("networkidle")
                         print("Điền xong phone number.")
                         
+                        # xuat hien pop up bao vi pham hoac khong hop le can xu ly throw Exception IP_BANNED
+                        popup_locator = page.locator("div.popup-content")
+                        if await popup_locator.is_visible(timeout=5000):
+                            popup_text = await popup_locator.inner_text()
+                            raise Exception(f"IP_BANNED: {popup_text}")
+                        await BrowserUtils.random_sleep(1,2)
+                        
                         # dien code xac minh 
                         print("Chờ nhận code xác minh...")
                         try:
@@ -177,6 +185,7 @@ async def worker(thread_id, port, semaphore, data_chunk):
 
                         # --- [FIX 3] LOGIC ĐỔI IP KHI LỖI ---
                         if "Timeout" in str(e) or "IP_BANNED" in str(e) or "Target closed" in str(e):
+                            failed_reason = str(e)
                             Logger.warning(thread_id, "Phát hiện mạng kém/Ban -> Đổi IP...")
                             ProxyManager.rotate_ip(port, thread_id=thread_id)
                             
@@ -193,7 +202,7 @@ async def worker(thread_id, port, semaphore, data_chunk):
                              Logger.error(thread_id, f"❌ GỤC NGÃ acc: {username}")
                 
                 if( not isOk ):
-                    FileManager.append_result("data/failed.txt", f"{username}|{password}|{phone_number}|Failed")
+                    FileManager.append_result("data/failed.txt", f"{username}|{password}|{phone_number}|Failed" + (f"|{failed_reason}" if failed_reason else ""))
                     
 
             # Đóng Browser khi xong hết data của thread này
@@ -220,7 +229,7 @@ async def main():
     tasks = []
     for i in range(len(data_chunks)):
         # Port tịnh tiến: 60000, 60001...
-        port = Config.BASE_PORT + i
+        port = base_port + i
         # Gán nhiệm vụ
         tasks.append(worker(i+1, port, semaphore, data_chunks[i]))  
     

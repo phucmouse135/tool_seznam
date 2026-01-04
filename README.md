@@ -53,8 +53,3 @@ This project is a robust automation tool built using Python and Playwright. It i
 ```bash
 python main.py
 ```
-
-**Fetch OnlineSim tariffs:**
-```bash
-python get_tariffs_to_json.py
-```

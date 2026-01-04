@@ -64,7 +64,7 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         
                         # Tăng timeout lên 60s
                         await page.goto(
-                            "https://registrace.seznam.cz/?service=email&return_url=https%3A%2F%2Femail.seznam.cz%2F" , timeout=60000
+                            "https://registrace.seznam.cz/?service=ucet&return_url=https%3A%2F%2Fucet.seznam.cz" , timeout=60000
                         )
                         
                         Logger.info(thread_id, "Trang đăng ký đã tải xong.")
@@ -103,40 +103,59 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         # check if phone not null 
                         if(len(phone_number) == 0): 
                             print("Call api to get phone number...")
-                            # return (tzid, phone_number)
-                            tzid, phone_number = await OnlineSimHelper.get_number("seznam.cz", 420)
-                            print("Received phone number:", phone_number)
+                            
+                            tzid = None
+                            for _retry in range(10):
+                                result = await OnlineSimHelper.get_number(service="seznam", country=420)
+                                if result:
+                                    tzid, phone_number = result
+                                    print("Received phone number:", phone_number)
+                                    break
+                                Logger.warning(thread_id, f"⚠️ Lấy số thất bại (Lần {_retry+1}/10). Đợi 2s...")
+                                await asyncio.sleep(2)
+                            
+                            if not tzid:
+                                Logger.error(thread_id, "❌ Đã thử 10 lần không lấy được số. Dừng chương trình!")
+                                import sys
+                                sys.exit(1)
                         
                         print("Fill phone number...", phone_number)
                         input_phone = page.locator("#register > form.phone > label.magic.phone.errorable > input[type=text]")
                         await input_phone.fill("")
                         await input_phone.press_sequentially(phone_number, delay=100)  
-                        
+                        await page.keyboard.press("Enter")
                         await page.wait_for_load_state("networkidle")
                         print("Điền xong phone number.")
+                        await BrowserUtils.random_sleep(1,2)
                         
-                        # xuat hien pop up bao vi pham hoac khong hop le can xu ly throw Exception IP_BANNED
-                        popup_locator = page.locator("div.popup-content")
-                        if await popup_locator.is_visible(timeout=5000):
-                            popup_text = await popup_locator.inner_text()
-                            raise Exception(f"IP_BANNED: {popup_text}")
+                        # <div class="alert" style="left: 680px; top: 259px;"><p>Registrace nebyla dokončena z důvodu prevence hromadných/robotických registrací. Zkuste registraci zopakovat později.</p><div><button type="submit">Rozumím</button></div></div>
+                        pop_up_locator = page.locator("div.alert")
+                        if await pop_up_locator.is_visible(timeout=5000):
+                            pop_up_text = await pop_up_locator.inner_text()
+                            Logger.error(thread_id, f"⚠️ Phát hiện pop-up lỗi: {pop_up_text}")
+                            failed_reason = "IP_BANNED"
+                            raise Exception(f"IP_BANNED: {pop_up_text}")
+                        await BrowserUtils.random_sleep(1,2)
+                        
+                        # xuat hien error khong hop le tren form Bylo posláno příliš SMS. Další lze odeslat za 24h.
+                        error_locator = page.locator("div.error")
+                        if await error_locator.is_visible(timeout=5000):
+                            error_text = await error_locator.inner_text()
+                            Logger.error(thread_id, f"⚠️ Phát hiện lỗi form: {error_text}")
+                            failed_reason = "SMS_SPAM_LIMIT"
+                            raise Exception(f"SMS_SPAM_LIMIT: {error_text}")
                         await BrowserUtils.random_sleep(1,2)
                         
                         # dien code xac minh 
                         print("Chờ nhận code xác minh...")
                         try:
-                            code = await OnlineSimHelper.wait_for_code(thread_id, tzid, timeout=180)
+                            code = await OnlineSimHelper.wait_for_code(tzid =tzid, timeout=180)
                         except Exception as e:
                             raise Exception(f"Lỗi nhận code: {e}")
                         if not code:
-                            # click nút Gửi lại code #register > form.phone > label.magic.pin.errorable > a
-                            resend_btn = page.locator("#register > form.phone > label.magic.pin.errorable > a")
-                            if await resend_btn.is_visible(timeout=10000):
-                                await resend_btn.click()
-                                print("Đã click gửi lại code.")
-                                code = await OnlineSimHelper.wait_for_code(thread_id, tzid, timeout=180)
-                            else:
-                                raise Exception("Không tìm thấy nút gửi lại code")
+                            # Nếu không có code thì lỗi NO_CODE
+                            failed_reason = "NO_CODE"
+                            raise Exception("NO_CODE: Không nhận được code xác minh trong thời gian chờ.")
                     
                         print("Nhận được code:", code)
                         
@@ -182,16 +201,17 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         
                         # Đóng context cũ bị lỗi
                         if context: await context.close()
+                        
+                        if "NO_CODE" in str(e):
+                            failed_reason = "NO_CODE"
+                            # Không cần retry nữa, lỗi này không khắc phục được bằng cách đổi IP
+                            break
 
                         # --- [FIX 3] LOGIC ĐỔI IP KHI LỖI ---
                         if "Timeout" in str(e) or "IP_BANNED" in str(e) or "Target closed" in str(e):
                             failed_reason = str(e)
                             Logger.warning(thread_id, "Phát hiện mạng kém/Ban -> Đổi IP...")
-                            ProxyManager.rotate_ip(port, thread_id=thread_id)
-                            
-                            # xóa cache DNS để tránh lỗi cũ
-                            await context.clear_cookies()
-                            await context.clear_permissions()
+                            await ProxyManager.rotate_ip(port=port, thread_id=thread_id) 
                             
                             # Đợi 5s cho ổn định 
                             BrowserUtils.random_sleep(3,5)

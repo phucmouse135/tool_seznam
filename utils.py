@@ -6,13 +6,16 @@ import os
 from datetime import datetime
 import requests
 from playwright.async_api import async_playwright, Page, BrowserContext
-from playwright_stealth import stealth
+from playwright_stealth.stealth import Stealth
+from functools import partial
+from config import Config
 
 # --- CONSTANTS (CẤU HÌNH CHUNG) ---
 PROXY_API_URL = "http://127.0.0.1:10101/api/proxy"
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 VIEWPORT_SIZE = {"width": 1920, "height": 1080}
 ONLINE_SIM_API_KEY = os.getenv("ONLINE_SIM_API_KEY")
+USER_AGENT_LIST = Config.USER_AGENT_LIST
 
 class Logger:
     """Class quản lý việc in log ra màn hình cho đẹp và dễ debug đa luồng"""
@@ -51,7 +54,7 @@ class ProxyManager:
     """Class chuyên xử lý logic liên quan đến 9Proxy"""
     
     @staticmethod
-    def rotate_ip(port: int, country: str = "CZ", thread_id: int = 0) -> bool:
+    async def rotate_ip(port: int, country: str = "CZ", thread_id: int = 0) -> bool:
         """
         Gọi API để đổi IP cho port chỉ định.
         Trả về True nếu thành công, False nếu thất bại.
@@ -114,7 +117,7 @@ class BrowserUtils:
         context = await browser.new_context(
             proxy={"server": proxy_url},
             viewport=VIEWPORT_SIZE,
-            user_agent=DEFAULT_USER_AGENT,
+            user_agent=random.choice(USER_AGENT_LIST),
             locale=locale,
             timezone_id=timezone,
             permissions=["geolocation"], # Cấp quyền vị trí để trông thật hơn
@@ -125,7 +128,7 @@ class BrowserUtils:
         
         # Kích hoạt Anti-Detect Stealth
         print("🕵️‍♂️ Thiết lập Stealth cho Page...")
-        # stealth(page)
+        await Stealth().apply_stealth_async(page)
         print("✅ Stealth đã được thiết lập.")        
         return context, page
 
@@ -254,15 +257,11 @@ class OnlineSimHelper:
     BASE_URL_GET_NUM = "https://onlinesim.io/api/getNum.php"
     BASE_URL_GET_STATE = "https://onlinesim.io/api/getState.php"
     BASE_URL_GET_TARIFFS = "https://onlinesim.io/api/getTariffs.php"
-    API_KEY = os.getenv("ONLINE_SIM_API_KEY")
-    
-    def __init__(self):
-        if not self.API_KEY:
-            raise ValueError("ONLINE_SIM_API_KEY is not set in environment variables.")
+    API_KEY = "YZns5KgF44YsTw6-NKT1G6v6-6EQ5N5sG-V1AgA5t7-aTgr7BuWAtAbF94"  # Thay bằng API Key thực của bạn
         
  
     @staticmethod   
-    def get_number(service="google", country=7):
+    async def get_number(service="google", country=7):
         """
         Bước 1: Lấy số điện thoại mới.
         :param service: Tên dịch vụ (ví dụ: 'google', 'facebook', 'telegram')
@@ -279,7 +278,14 @@ class OnlineSimHelper:
         
         
         try:
-            resp = requests.get(OnlineSimHelper.BASE_URL_GET_NUM, params=params, timeout=10000)
+            resp = await asyncio.to_thread(
+                partial(
+                    requests.get,
+                    OnlineSimHelper.BASE_URL_GET_NUM,
+                    params=params,
+                    timeout=10000
+                )
+            )
             data = resp.json()
             
             # Check response theo tài liệu: response == 1 là thành công
@@ -291,14 +297,13 @@ class OnlineSimHelper:
             
             tzid = data.get("tzid")
             phone_number = data.get("number")
-            # API trả về có thể không có key 'number' ngay ở cấp 1 tuỳ format, 
-            # nhưng theo doc bạn đưa thì nếu number=true sẽ hiện.
-            # Lưu ý: Cần kiểm tra kỹ response thực tế, đôi khi nó nằm trong object khác.
-            # Ở đây giả định data trả về dạng: {"response":1, "tzid":123, "number":"+12345"}
-            # Nếu api trả về chỉ có tzid, bạn phải gọi getState 1 lần để lấy số. 
-            # Tuy nhiên tham số number=true thường sẽ trả về luôn.
+            # +420737531512 => 737 531 512
+            if not phone_number:
+                raise Exception("Số điện thoại trống từ API")
+            phone_number = phone_number[-9:]
             
             # Để chắc chắn, tôi return tzid. Số điện thoại có thể lấy ở bước getState nếu ở đây thiếu.
+            Logger.success("OnlineSim", f"✅ Lấy số thành công: {phone_number} (GD: {tzid})")
             return (tzid, phone_number)
             
         except Exception as e:
@@ -306,7 +311,7 @@ class OnlineSimHelper:
             return None
 
     @staticmethod
-    def wait_for_code(tzid, timeout=120):
+    async def wait_for_code(tzid, timeout=120):
         """
         Bước 2: Chờ nhận OTP (Cơ chế Polling).
         :param tzid: Mã giao dịch lấy từ bước 1.
@@ -321,18 +326,30 @@ class OnlineSimHelper:
             params = {
                 "apikey": OnlineSimHelper.API_KEY,
                 "tzid": tzid,
-                "message_to_code": 1, # QUAN TRỌNG: 1 = Chỉ lấy Code, 0 = Lấy cả tin nhắn
-                "msg_list": 0         # 0 = Chỉ lấy tin nhắn active
+                "message_to_code": 1,
+                "msg_list": 1,
+                "orderby": "asc",
+                "clean": 0
             }
-            
+
             try:
-                resp = requests.get(OnlineSimHelper.BASE_URL_GET_STATE, params=params, timeout=10)
-                data = resp.json() 
-                # API này trả về 1 List Array: [{"response": "TZ_NUM_WAIT", ...}]
+                resp = await asyncio.to_thread(
+                    partial(
+                        requests.get,
+                        OnlineSimHelper.BASE_URL_GET_STATE,
+                        params=params,
+                        timeout=10
+                        )
+                )
+                # Logger.info("Resp", f"HTTP Status: {resp.status_code}")
+
+                data = resp.json()
+                Logger.info("OnlineSim", f"📨 getState: {data}")
                 
                 if isinstance(data, list) and len(data) > 0:
                     item = data[0] # Lấy giao dịch đầu tiên
                     status = item.get("response")
+                    Logger.info("OnlineSim", f"📨 Trạng thái hiện tại: {status}")
                     
                     # --- XỬ LÝ TRẠNG THÁI ---
                     if status == "TZ_NUM_ANSWER":
@@ -344,6 +361,7 @@ class OnlineSimHelper:
                     
                     elif status == "TZ_NUM_WAIT":
                         # ⏳ Vẫn đang chờ -> Không làm gì cả, chờ loop tiếp
+                        Logger.info("OnlineSim", "⏳ Chưa có SMS, tiếp tục chờ...")
                         pass
                     
                     elif status == "TZ_OVER_OK":
@@ -361,7 +379,7 @@ class OnlineSimHelper:
                 print(f"⚠️ Lỗi kết nối API check code: {e}")
 
             # Ngủ 3 giây rồi hỏi lại (tránh spam nát API của họ)
-            time.sleep(5)
+            await asyncio.sleep(3)
             
         print("❌ Hết thời gian chờ (Timeout).")
         return None

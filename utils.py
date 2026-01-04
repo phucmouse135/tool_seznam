@@ -254,7 +254,7 @@ class OnlineSimHelper:
     BASE_URL_GET_NUM = "https://onlinesim.io/api/getNum.php"
     BASE_URL_GET_STATE = "https://onlinesim.io/api/getState.php"
     BASE_URL_GET_TARIFFS = "https://onlinesim.io/api/getTariffs.php"
-    API_KEY ="YZns5KgF44YsTw6-NKT1G6v6-6EQ5N5sG-V1AgA5t7-aTgr7BuWAtAbF94"  # Thay bằng API Key thực của bạn
+    API_KEY = os.getenv("ONLINE_SIM_API_KEY")
     
     def __init__(self):
         if not self.API_KEY:

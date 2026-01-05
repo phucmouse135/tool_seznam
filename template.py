@@ -106,8 +106,8 @@ async def main():
     num_threads = int(input())
     base_port = BASE_PORT
     
-    # Chỉ cho phép tối đa 3 trình duyệt mở cùng lúc để đỡ lag máy
-    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT) 
+    # Chạy song song đúng theo số luồng người dùng nhập
+    semaphore = asyncio.Semaphore(max(1, num_threads))
     
     # Đọc data
     list_data = FileManager.read_lines("data/input.txt")

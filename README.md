@@ -1,3 +1,8 @@
+
+## Yêu cầu xoay IP trước tác vụ
+
+Tool sẽ **xoay IP và verify IP public (qua proxy)** trước khi thực hiện các thao tác chính.
+Nếu không verify được IP đã đổi trong giới hạn thời gian, chương trình sẽ báo lỗi để tránh chạy khi IP chưa xoay.
 # Automation Tool
 
 ## Introduction

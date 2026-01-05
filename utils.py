@@ -1,11 +1,10 @@
 import asyncio
 import random
 import time
-import json
 import os
 from datetime import datetime
 import requests
-from playwright.async_api import async_playwright, Page, BrowserContext
+from playwright.async_api import Page, BrowserContext
 from playwright_stealth.stealth import Stealth
 from functools import partial
 from config import Config
@@ -52,6 +51,42 @@ class Logger:
 
 class ProxyManager:
     """Class chuyên xử lý logic liên quan đến 9Proxy"""
+
+    _verified_ip_cache: dict[int, str] = {}
+
+    @staticmethod
+    def _get_api_root() -> str:
+        """Return base root like http://127.0.0.1:10101 from Config.PROXY_API_BASE/PROXY_API_URL."""
+        base = getattr(Config, "PROXY_API_BASE", PROXY_API_URL) or PROXY_API_URL
+        if "/api/" in base:
+            return base.split("/api/")[0]
+        # Fallback: strip trailing path
+        return base.rstrip("/").rsplit("/", 1)[0]
+
+    @staticmethod
+    async def is_port_online(port: int, timeout: int = 10) -> bool | None:
+        """Check port status via /api/port_check. Returns True/False, or None if unknown/error."""
+        url = ProxyManager._get_api_root().rstrip("/") + "/api/port_check"
+
+        def _check() -> bool | None:
+            try:
+                resp = requests.get(url, params={"t": 2, "ports": str(port)}, timeout=timeout)
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                if not isinstance(data, dict):
+                    return None
+                items = data.get("data")
+                if not isinstance(items, list) or not items:
+                    return None
+                item0 = items[0]
+                if isinstance(item0, dict) and "online" in item0:
+                    return bool(item0.get("online"))
+            except Exception:
+                return None
+            return None
+
+        return await asyncio.to_thread(_check)
     
     @staticmethod
     async def rotate_ip(port: int, country: str = "CZ", thread_id: int = 0) -> bool:
@@ -90,8 +125,170 @@ class ProxyManager:
         return f"http://127.0.0.1:{port}"
 
 
+    @staticmethod
+    async def get_public_ip_via_proxy(port: int, timeout: int = 12) -> str | None:
+        """Lấy IP public thông qua proxy local (127.0.0.1:port)."""
+        proxy_url = ProxyManager.get_local_proxy_url(port)
+        proxies = {"http": proxy_url, "https": proxy_url}
+
+        def _fetch(url: str) -> str | None:
+            try:
+                r = requests.get(url, proxies=proxies, timeout=timeout)
+                if r.status_code != 200:
+                    return None
+                data = r.json()
+                if isinstance(data, dict) and isinstance(data.get("ip"), str):
+                    return data["ip"].strip()
+                if isinstance(data, dict) and isinstance(data.get("origin"), str):
+                    return data["origin"].split(",")[0].strip()
+            except Exception:
+                return None
+            return None
+
+        # Thử 2 endpoint phổ biến để tránh 1 endpoint chết.
+        for url in ("https://api.ipify.org?format=json", "https://httpbin.org/ip"):
+            ip = await asyncio.to_thread(_fetch, url)
+            if ip:
+                return ip
+        return None
+
+
+    @staticmethod
+    async def ensure_rotated_ip(
+        port: int,
+        thread_id: int = 0,
+        country: str = "CZ",
+        max_wait_seconds: int = 40,
+        check_interval_seconds: int = 2,
+        max_attempts: int = 3,
+        force_rotate: bool = False,
+    ) -> str:
+        """Bắt buộc xoay IP và chỉ trả về khi verify IP public đã đổi.
+
+        - Dùng IP public nhìn thấy qua proxy (port)
+        - Nếu không đổi trong giới hạn => raise Exception để fail fast
+        """
+        # Nếu đã verify IP cho port này trong phiên chạy hiện tại thì không rotate lại (tiết kiệm proxy)
+        if not force_rotate:
+            cached = ProxyManager._verified_ip_cache.get(port)
+            if cached:
+                Logger.info(thread_id, f"🔎 Dùng IP đã verify (cache) Port {port}: {cached}")
+                return cached
+
+        old_ip = await ProxyManager.get_public_ip_via_proxy(port)
+        Logger.info(thread_id, f"🔎 IP hiện tại qua proxy Port {port}: {old_ip}")
+
+        # Dùng /api/port_check để tránh rotate không cần thiết: nếu port online và đã có IP -> coi như ok
+        if not force_rotate:
+            online = await ProxyManager.is_port_online(port)
+            if online is True and old_ip:
+                ProxyManager._verified_ip_cache[port] = old_ip
+                Logger.success(thread_id, f"✅ Port {port} online, giữ IP hiện tại: {old_ip}")
+                return old_ip
+
+        for attempt in range(1, max_attempts + 1):
+            ok = await ProxyManager.rotate_ip(port=port, country=country, thread_id=thread_id)
+            if not ok:
+                Logger.warning(thread_id, f"⚠️ Rotate IP thất bại (attempt {attempt}/{max_attempts}).")
+                continue
+
+            deadline = time.monotonic() + max_wait_seconds
+            while time.monotonic() < deadline:
+                new_ip = await ProxyManager.get_public_ip_via_proxy(port)
+                if new_ip and new_ip != old_ip:
+                    Logger.success(thread_id, f"✅ Xoay IP OK Port {port}: {old_ip} -> {new_ip}")
+                    ProxyManager._verified_ip_cache[port] = new_ip
+                    return new_ip
+                await asyncio.sleep(check_interval_seconds)
+
+            Logger.warning(thread_id, f"⚠️ Chưa thấy IP đổi sau {max_wait_seconds}s (attempt {attempt}/{max_attempts}).")
+
+        raise Exception(f"ROTATE_IP_VERIFY_FAILED: Port={port}, old_ip={old_ip}")
+
+
 class BrowserUtils:
     """Class cấu hình Browser và Context (Stealth, Anti-Detect)"""
+
+    @staticmethod
+    async def detect_antibot_popup(page: Page, timeout_seconds: float = 0.0) -> str | None:
+        """Detect Seznam anti-bot / ban popup.
+
+        Returns popup text if detected, else None.
+        This is intentionally defensive: the DOM can vary (alert/modal/dialog).
+        """
+        poll_interval = 0.25
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+
+        btn = page.locator("button:has-text('Rozumím'), button:has-text('Rozumim')")
+        key_text_locators = [
+            page.locator("text=/registrace nebyla dokončena/i"),
+            page.locator("text=/registration not completed/i"),
+            page.locator("text=/robotick/i"),
+            page.locator("text=/hromadn/i"),
+        ]
+
+        def _looks_like_ban(text: str) -> bool:
+            t = text.lower()
+            return (
+                "registrace nebyla dokončena" in t
+                or "registration not completed" in t
+                or "rozumím" in t
+                or "rozumim" in t
+                or "robot" in t
+                or "robotick" in t
+                or "hromadn" in t
+                or "prevence" in t
+            )
+
+        while True:
+            # 1) Button 'Rozumím' is a very strong signal
+            if await btn.first.is_visible(timeout=250):
+                try:
+                    container = btn.first.locator(
+                        "xpath=ancestor::*[self::div or self::section][1]"
+                    )
+                    txt = (await container.inner_text()).strip()
+                except Exception:
+                    txt = ""
+                if not txt:
+                    txt = "Registrace nebyla dokončena (Rozumím)"
+                return txt
+
+            # 2) Key phrases visible
+            for loc in key_text_locators:
+                try:
+                    if await loc.first.is_visible(timeout=250):
+                        try:
+                            container = loc.first.locator(
+                                "xpath=ancestor::*[self::div or self::section][1]"
+                            )
+                            txt = (await container.inner_text()).strip()
+                        except Exception:
+                            txt = (await loc.first.inner_text()).strip()
+                        if txt and _looks_like_ban(txt):
+                            return txt
+                        return "Registrace nebyla dokončena"
+                except Exception:
+                    continue
+
+            # 3) Fallback: visible dialog-like containers
+            dialog = page.locator(
+                "div[role='dialog'], div[aria-modal='true'], div.modal, div.alert, div:has(button:has-text('Rozumím')), div:has(button:has-text('Rozumim'))"
+            )
+            try:
+                if await dialog.first.is_visible(timeout=250):
+                    try:
+                        txt = (await dialog.first.inner_text()).strip()
+                    except Exception:
+                        txt = ""
+                    if txt and _looks_like_ban(txt):
+                        return txt
+            except Exception:
+                pass
+
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(poll_interval)
 
     @staticmethod
     def get_launch_args() -> list:
@@ -354,7 +551,9 @@ class OnlineSimHelper:
                     # --- XỬ LÝ TRẠNG THÁI ---
                     if status == "TZ_NUM_ANSWER":
                         # ✅ Đã có tin nhắn
-                        code = item.get("msg").strip() # Do message_to_code=1 nên field này là code
+                        Logger.success("OnlineSim", "✅ Đã nhận được SMS!")
+                        code = item.get("msg")
+                        Logger.info("OnlineSim", f"📨 Nội dung SMS: {code}")
                         code = code[-code.rfind(" ")-4:code.rfind(" ")]
                         print(f"✅ Đã nhận Code: {code}")
                         return code
@@ -379,7 +578,7 @@ class OnlineSimHelper:
                 print(f"⚠️ Lỗi kết nối API check code: {e}")
 
             # Ngủ 3 giây rồi hỏi lại (tránh spam nát API của họ)
-            await asyncio.sleep(3)
+            await asyncio.sleep(10)
             
         print("❌ Hết thời gian chờ (Timeout).")
         return None

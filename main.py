@@ -20,8 +20,10 @@ async def worker(thread_id, port, semaphore, data_chunk):
         Logger.info(thread_id, f"🚀 Khởi động Worker trên Port {port}")
         
         # Init IP lần đầu cho chắc ăn
-        # ProxyManager.rotate_ip(port, thread_id=thread_id)
-
+        Logger.info(thread_id, f"Đang khởi tạo IP lần đầu cho Port {port}...")
+        await ProxyManager.ensure_rotated_ip(port, thread_id=thread_id, force_rotate=True)
+        await BrowserUtils.random_sleep(2,4)
+        Logger.info(thread_id, f"Khởi tạo IP xong cho Port {port}. Bắt đầu xử lý data...")
         # 2. Bật Playwright MỘT LẦN cho cả lô data này (Tiết kiệm RAM)
         async with async_playwright() as p:
             # Launch Browser (Reuse browser instance)
@@ -39,6 +41,9 @@ async def worker(thread_id, port, semaphore, data_chunk):
                 failed_reason = ""
                 Logger.info(thread_id, f"▶️ Đang xử lý: {username}")
                 isOk = False
+
+                # BẮT BUỘC: xoay IP (có verify) trước khi làm bất kỳ thao tác nào cho acc
+                await ProxyManager.ensure_rotated_ip(port, thread_id=thread_id)
 
                 # 4. Cơ chế RETRY cho từng Item cụ thể
                 for attempt in range(Config.RETRY_LIMIT):
@@ -69,6 +74,12 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         
                         Logger.info(thread_id, "Trang đăng ký đã tải xong.")
                         await page.wait_for_load_state("networkidle")
+
+                        pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=2)
+                        if pop:
+                            Logger.error(thread_id, f"⚠️ Phát hiện pop-up anti-bot (sau load): {pop}")
+                            failed_reason = "IP_BANNED"
+                            raise Exception(f"IP_BANNED: {pop}")
                         
                         
                         # Click Đăng ký
@@ -77,6 +88,12 @@ async def worker(thread_id, port, semaphore, data_chunk):
                             await reg_btn.click()
                         else:
                             raise Exception("Không tìm thấy nút đăng ký")
+
+                        pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=2)
+                        if pop:
+                            Logger.error(thread_id, f"⚠️ Phát hiện pop-up anti-bot (sau click register): {pop}")
+                            failed_reason = "IP_BANNED"
+                            raise Exception(f"IP_BANNED: {pop}")
 
                         # Điền form
                         print("Điền username...", username)
@@ -87,6 +104,21 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         await input_username.press_sequentially(username, delay=100)
                         print("Điền xong username.")
                         BrowserUtils.random_sleep(1,2)
+
+                        # Check email taken (CZ) right after entering username/email
+                        email_error_locator = page.locator("div.error:visible")
+                        for _ in range(20):  # ~5s
+                            if await email_error_locator.count() > 0:
+                                try:
+                                    email_err_txt = (await email_error_locator.first.inner_text()).strip()
+                                except Exception:
+                                    email_err_txt = ""
+
+                                if email_err_txt and "adresa je obsazen" in email_err_txt.lower():
+                                    failed_reason = "EMAIL_TAKEN"
+                                    raise Exception(f"EMAIL_TAKEN: {email_err_txt}")
+                                break
+                            await asyncio.sleep(0.25)
                         
                         print("Fill password...", password)
                         input_password = page.locator("#register > form.main > label.magic.password.errorable > input[type=password]")
@@ -99,6 +131,12 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         await page.keyboard.press("Enter")
                         await page.wait_for_load_state("networkidle")
                         await BrowserUtils.random_sleep(1,2)
+
+                        pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=2)
+                        if pop:
+                            Logger.error(thread_id, f"⚠️ Phát hiện pop-up anti-bot (sau submit form): {pop}")
+                            failed_reason = "IP_BANNED"
+                            raise Exception(f"IP_BANNED: {pop}")
                         
                         # check if phone not null 
                         if(len(phone_number) == 0): 
@@ -115,43 +153,54 @@ async def worker(thread_id, port, semaphore, data_chunk):
                                 await asyncio.sleep(2)
                             
                             if not tzid:
-                                Logger.error(thread_id, "❌ Đã thử 10 lần không lấy được số. Dừng chương trình!")
-                                import sys
-                                sys.exit(1)
+                                Logger.error(thread_id, "❌ Đã thử 10 lần không lấy được số.")
+                                failed_reason = "GET_PHONE_FAILED"
+                                raise Exception("GET_PHONE_FAILED")
                         
                         print("Fill phone number...", phone_number)
                         input_phone = page.locator("#register > form.phone > label.magic.phone.errorable > input[type=text]")
                         await input_phone.fill("")
                         await input_phone.press_sequentially(phone_number, delay=100)  
                         await page.keyboard.press("Enter")
-                        await page.wait_for_load_state("networkidle")
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            pass
                         print("Điền xong phone number.")
-                        await BrowserUtils.random_sleep(1,2)
-                        
-                        # <div class="alert" style="left: 680px; top: 259px;"><p>Registrace nebyla dokončena z důvodu prevence hromadných/robotických registrací. Zkuste registraci zopakovat později.</p><div><button type="submit">Rozumím</button></div></div>
-                        pop_up_locator = page.locator("div.alert", has_text="Registration not completed due to prevent mass/robot registrations. Please try registering again later.")
-                        if await pop_up_locator.is_visible(timeout=10000):
-                            pop_up_text = await pop_up_locator.inner_text()
-                            Logger.error(thread_id, f"⚠️ Phát hiện pop-up lỗi: {pop_up_text}")
+                        await BrowserUtils.random_sleep(2,3)
+
+                        # Popup anti-bot (CZ/EN) có thể hiện trễ => poll mạnh hơn + selector rộng
+                        pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=10)
+                        if pop:
+                            Logger.error(thread_id, f"⚠️ Phát hiện pop-up anti-bot (sau phone): {pop}")
                             failed_reason = "IP_BANNED"
-                            raise Exception(f"IP_BANNED: {pop_up_text}")
+                            raise Exception(f"IP_BANNED: {pop}")
                         
-                        # xuat hien error khong hop le tren form Bylo posláno příliš SMS. Další lze odeslat za 24h.
-                        error_locator = page.locator("div.error", has_text="Too many SMS have been sent. You can send another one in 24 hours.")
-                        if await error_locator.is_visible(timeout=10000):
-                            error_text = await error_locator.inner_text()
-                            Logger.error(thread_id, f"⚠️ Phát hiện lỗi form: {error_text}")
-                            failed_reason = "SMS_SPAM_LIMIT"
-                            raise Exception(f"SMS_SPAM_LIMIT: {error_text}")
+                        # Lỗi giới hạn gửi SMS (CZ/EN) có thể hiện trễ => poll vài giây để bắt chắc
+                        sms_error = page.locator("div.error:visible")
+                        for _ in range(20):  # ~5s
+                            if await sms_error.count() > 0:
+                                error_text = (await sms_error.first.inner_text()).strip()
+                                t = error_text.lower()
+                                is_sms_limit = (
+                                    ("příliš" in t and "sms" in t and ("24h" in t or "24 h" in t))
+                                    or ("too many" in t and "sms" in t and "24" in t)
+                                )
+                                if is_sms_limit:
+                                    Logger.error(thread_id, f"⚠️ Phát hiện lỗi SMS limit: {error_text}")
+                                    failed_reason = "SMS_SPAM_LIMIT"
+                                    raise Exception(f"SMS_SPAM_LIMIT: {error_text}")
+                            await asyncio.sleep(0.25)
                         
                         # dien code xac minh 
                         print("Chờ nhận code xác minh...")
                         try:
-                            code = await OnlineSimHelper.wait_for_code(tzid =tzid, timeout=180)
+                            code = await OnlineSimHelper.wait_for_code(tzid =tzid, timeout=120)
                         except Exception as e:
                             raise Exception(f"Lỗi nhận code: {e}")
                         if not code:
                             # Nếu không có code thì lỗi NO_CODE
+                            Logger.error(thread_id, "❌ Không nhận được code xác minh trong thời gian chờ.")
                             failed_reason = "NO_CODE"
                             raise Exception("NO_CODE: Không nhận được code xác minh trong thời gian chờ.")
                     
@@ -165,7 +214,23 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         
                         # press ENTER to submit final form
                         await page.keyboard.press("Enter")
-                        await page.wait_for_load_state("networkidle")
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            pass
+
+                        # Popup anti-bot có thể xuất hiện sau khi submit OTP (poll mạnh hơn)
+                        pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=10)
+                        if pop:
+                            Logger.error(thread_id, f"⚠️ Phát hiện pop-up anti-bot (sau OTP): {pop}")
+                            failed_reason = "IP_BANNED"
+                            raise Exception(f"IP_BANNED: {pop}")
+
+                        pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=2)
+                        if pop:
+                            Logger.error(thread_id, f"⚠️ Phát hiện pop-up anti-bot (trước final): {pop}")
+                            failed_reason = "IP_BANNED"
+                            raise Exception(f"IP_BANNED: {pop}")
                     
                         # sau do chọn I agree and continue (<button type="submit" data-action="ok"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">I agree and continue</font></font></button>) 
                         agree_btn = page.locator("button[data-action='ok']")
@@ -174,6 +239,12 @@ async def worker(thread_id, port, semaphore, data_chunk):
                             await page.wait_for_load_state("networkidle")
                         else:
                             raise Exception("Không tìm thấy nút I agree and continue")
+
+                        pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=2)
+                        if pop:
+                            Logger.error(thread_id, f"⚠️ Phát hiện pop-up anti-bot (sau agree): {pop}")
+                            failed_reason = "IP_BANNED"
+                            raise Exception(f"IP_BANNED: {pop}")
                         
                         #  sau do chờ giao diện load tiến hành nhấn <button type="submit" class="back" data-locale="back_to_inbox"><font dir="auto" style="vertical-align: inherit;"><font dir="auto" style="vertical-align: inherit;">Quay lại Email</font></font></button>
                         back_btn = page.locator("button.back[data-locale='back_to_inbox']")
@@ -198,11 +269,25 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         Logger.error(thread_id, f"⚠️ Lỗi (Lần {attempt+1}): {e}")
                         
                         # Đóng context cũ bị lỗi
-                        if context: await context.close()
+                        if context:
+                            await context.close()
                         
                         if "NO_CODE" in str(e):
                             failed_reason = "NO_CODE"
                             # Không cần retry nữa, lỗi này không khắc phục được bằng cách đổi IP
+                            break
+
+                        # Timeout => bỏ qua email hiện tại (không retry / không rotate)
+                        if "Timeout" in str(e):
+                            failed_reason = "TIMEOUT"
+                            break
+
+                        if "EMAIL_TAKEN" in str(e):
+                            failed_reason = "EMAIL_TAKEN"
+                            break
+
+                        if "GET_PHONE_FAILED" in str(e):
+                            failed_reason = "GET_PHONE_FAILED"
                             break
                     
                         if "SMS_SPAM_LIMIT" in str(e): 
@@ -210,13 +295,13 @@ async def worker(thread_id, port, semaphore, data_chunk):
                             break
 
                         # --- [FIX 3] LOGIC ĐỔI IP KHI LỖI ---
-                        if "Timeout" in str(e) or "IP_BANNED" in str(e) or "Target closed" in str(e):
+                        if "IP_BANNED" in str(e) or "Target closed" in str(e):
                             failed_reason = str(e)
                             Logger.warning(thread_id, "Phát hiện mạng kém/Ban -> Đổi IP...")
-                            await ProxyManager.rotate_ip(port=port, thread_id=thread_id) 
+                            await ProxyManager.ensure_rotated_ip(port=port, thread_id=thread_id, force_rotate=True)
                             
                             # Đợi 5s cho ổn định 
-                            BrowserUtils.random_sleep(3,5)
+                            await BrowserUtils.random_sleep(3,5)
                             
                         
                         # Nếu là lần cuối cùng mà vẫn lỗi -> Ghi log Failed
@@ -236,8 +321,8 @@ async def main():
     num_threads = int(input())
     base_port = BASE_PORT
     
-    # Chỉ cho phép tối đa 3 trình duyệt mở cùng lúc để đỡ lag máy
-    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT) 
+    # Chạy song song đúng theo số luồng người dùng nhập
+    semaphore = asyncio.Semaphore(max(1, num_threads))
     
     # Đọc data
     list_data = FileManager.read_lines("data/input.txt")
@@ -252,10 +337,6 @@ async def main():
     for i in range(len(data_chunks)):
         # Port tịnh tiến: 60000, 60001...
         port = base_port + i
-        Logger.info(f"Đổi IP cho port {port}")
-        await ProxyManager.rotate_ip(port, thread_id=i)
-        await BrowserUtils.random_sleep(2,4)
-        Logger.info(f"Đổi IP xong cho port {port}")
         # Gán nhiệm vụ
         tasks.append(worker(i+1, port, semaphore, data_chunks[i]))  
     

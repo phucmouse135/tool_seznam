@@ -2,8 +2,6 @@ import customtkinter as ctk
 from tkinter import ttk, filedialog, messagebox
 import threading
 import asyncio
-import os
-import sys
 from playwright.async_api import async_playwright
 from utils import Logger, ProxyManager, BrowserUtils, DataHelper, FileManager, OnlineSimHelper
 from config import Config
@@ -133,18 +131,22 @@ class AutomationApp(ctk.CTk):
 
     def parse_input_line(self, line, format_str):
         try:
-            if not line: return None, None
+            if not line:
+                return None, None
             
             # Determine delimiter (default |)
             delimiter = "|"
-            if ";" in format_str: delimiter = ";"
-            elif "," in format_str: delimiter = ","
+            if ";" in format_str:
+                delimiter = ";"
+            elif "," in format_str:
+                delimiter = ","
             
             # Split format and line
             fmt_parts = [x.strip().lower() for x in format_str.split(delimiter)]
             line_parts = [x.strip() for x in line.split(delimiter)]
             
-            if not fmt_parts: return None, None
+            if not fmt_parts:
+                return None, None
             
             data = {}
             for i, key in enumerate(fmt_parts):
@@ -156,8 +158,10 @@ class AutomationApp(ctk.CTk):
             pwd = data.get("pass") or data.get("password") or data.get("pwd") or ""
             
             # Fallback if format is just one column or mapping failed but we have parts
-            if not email and len(line_parts) > 0: email = line_parts[0]
-            if not pwd and len(line_parts) > 1: pwd = line_parts[1]
+            if not email and len(line_parts) > 0:
+                email = line_parts[0]
+            if not pwd and len(line_parts) > 1:
+                pwd = line_parts[1]
             
             return email, pwd
         except Exception:
@@ -288,7 +292,7 @@ class AutomationApp(ctk.CTk):
 
     # --- CORE LOGIC (Adapted from main.py) ---
     async def main_logic(self, data_list, num_threads):
-        semaphore = asyncio.Semaphore(Config.SEMAPHORE_LIMIT) # Vẫn dùng limit cứng của config cho an toàn
+        semaphore = asyncio.Semaphore(max(1, num_threads))
         
         # Chia chunk
         chunks = DataHelper.chunk_data(data_list, num_threads)
@@ -312,6 +316,9 @@ class AutomationApp(ctk.CTk):
             Logger.info(thread_id, f"🚀 Worker UI Start Port {port}")
             
             try:
+                # BẮT BUỘC: xoay IP (có verify) trước khi chạy tác vụ
+                await ProxyManager.ensure_rotated_ip(port, thread_id=thread_id, force_rotate=True)
+
                 async with async_playwright() as p:
                     browser = await p.chromium.launch(headless=False, args=BrowserUtils.get_launch_args())
                     
@@ -331,9 +338,13 @@ class AutomationApp(ctk.CTk):
                         failed_reason = ""
                         isOk = False
 
+                        # BẮT BUỘC: xoay IP (có verify) trước khi làm bất kỳ thao tác nào cho acc
+                        await ProxyManager.ensure_rotated_ip(port, thread_id=thread_id)
+
                         # Retry Loop
                         for attempt in range(Config.RETRY_LIMIT):
-                            if self.stop_event.is_set(): break
+                            if self.stop_event.is_set():
+                                break
                             context = None
                             try:
                                 self.update_row_status(item_id, f"Running ({attempt+1})...", "")
@@ -350,10 +361,18 @@ class AutomationApp(ctk.CTk):
                                 await page.goto("https://registrace.seznam.cz/?service=ucet&return_url=https%3A%2F%2Fucet.seznam.cz", timeout=60000)
                                 await page.wait_for_load_state("networkidle")
 
+                                pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=2)
+                                if pop:
+                                    raise Exception(f"IP_BANNED: {pop}")
+
                                 # Click Register
                                 reg_btn = page.locator("#register form.intro button.official")
                                 if await reg_btn.is_visible(timeout=10000):
                                     await reg_btn.click()
+
+                                pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=2)
+                                if pop:
+                                    raise Exception(f"IP_BANNED: {pop}")
                                 
                                 # Fill Form
                                 input_username = page.locator("#register-username")
@@ -362,6 +381,19 @@ class AutomationApp(ctk.CTk):
                                 await input_username.press("Backspace")
                                 await input_username.press_sequentially(username, delay=100)
                                 await BrowserUtils.random_sleep(1, 2)
+
+                                # Email taken (CZ) right after entering username/email
+                                email_error_locator = page.locator("div.error:visible")
+                                for _ in range(20):  # ~5s
+                                    if await email_error_locator.count() > 0:
+                                        try:
+                                            email_err_txt = (await email_error_locator.first.inner_text()).strip()
+                                        except Exception:
+                                            email_err_txt = ""
+                                        if email_err_txt and "adresa je obsazen" in email_err_txt.lower():
+                                            raise Exception(f"EMAIL_TAKEN: {email_err_txt}")
+                                        break
+                                    await asyncio.sleep(0.25)
 
                                 input_password = page.locator("#register > form.main > label.magic.password.errorable > input[type=password]")
                                 await input_password.fill("")
@@ -372,13 +404,18 @@ class AutomationApp(ctk.CTk):
                                 await page.wait_for_load_state("networkidle")
                                 await BrowserUtils.random_sleep(1, 2)
 
+                                pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=2)
+                                if pop:
+                                    raise Exception(f"IP_BANNED: {pop}")
+
                                 # Get Phone
                                 if not phone_number:
                                     self.update_row_status(item_id, "Get Phone...", "")
                                     # Retry get number logic
                                     tzid = None
                                     for _retry in range(10):
-                                        if self.stop_event.is_set(): break
+                                        if self.stop_event.is_set():
+                                            break
                                         result = await OnlineSimHelper.get_number(service="seznam", country=420)
                                         if result:
                                             tzid, phone_number = result
@@ -396,16 +433,31 @@ class AutomationApp(ctk.CTk):
                                 await input_phone.fill("")
                                 await input_phone.press_sequentially(phone_number, delay=100)
                                 await page.keyboard.press("Enter")
-                                await page.wait_for_load_state("networkidle")
+                                try:
+                                    await page.wait_for_load_state("networkidle", timeout=5000)
+                                except Exception:
+                                    pass
+
+                                # Check anti-bot popup (có thể hiện trễ) => poll mạnh hơn + selector rộng
+                                pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=10)
+                                if pop:
+                                    raise Exception(f"IP_BANNED: {pop}")
                                 
-                                # Check Errors
-                                pop_up_locator = page.locator("div.alert")
-                                if await pop_up_locator.is_visible(timeout=5000):
-                                    raise Exception("IP_BANNED")
-                                
-                                error_locator = page.locator("div.error")
-                                if await error_locator.is_visible(timeout=5000):
-                                    raise Exception("SMS_SPAM_LIMIT")
+                                # Check SMS spam limit (CZ/EN) - không bắt bừa mọi div.error
+                                error_locator = page.locator("div.error:visible")
+                                for _ in range(20):  # ~5s
+                                    if await error_locator.count() > 0:
+                                        txt = (await error_locator.first.inner_text()).strip()
+                                        t = txt.lower()
+                                        is_sms_limit = (
+                                            ("příliš" in t and "sms" in t and ("24h" in t or "24 h" in t))
+                                            or ("too many" in t and "sms" in t and "24" in t)
+                                        )
+                                        if is_sms_limit:
+                                            raise Exception(f"SMS_SPAM_LIMIT: {txt}")
+                                        # Nếu là lỗi khác thì không coi là spam-limit ở đây
+                                        break
+                                    await asyncio.sleep(0.25)
 
                                 # Wait Code
                                 self.update_row_status(item_id, "Waiting Code...", phone_number)
@@ -418,19 +470,35 @@ class AutomationApp(ctk.CTk):
                                         code = await OnlineSimHelper.wait_for_code(tzid, timeout=180)
                                 
                                 if not code:
-                                    raise Exception("NO_CODE")
+                                    raise Exception("NO_CODE: OTP timeout")
 
                                 # Fill Code
                                 input_code = page.locator("#register > form.phone-verification > label.magic.code.errorable > input[type=text]")
                                 await input_code.fill("")
                                 await input_code.press_sequentially(code, delay=100)
                                 await page.keyboard.press("Enter")
-                                await page.wait_for_load_state("networkidle")
+                                try:
+                                    await page.wait_for_load_state("networkidle", timeout=5000)
+                                except Exception:
+                                    pass
+
+                                # Popup anti-bot cũng có thể xuất hiện sau khi submit OTP (poll mạnh hơn)
+                                pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=10)
+                                if pop:
+                                    raise Exception(f"IP_BANNED: {pop}")
+
+                                pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=2)
+                                if pop:
+                                    raise Exception(f"IP_BANNED: {pop}")
 
                                 # Final Steps
                                 agree_btn = page.locator("button[data-action='ok']")
                                 if await agree_btn.is_visible(timeout=10000):
                                     await agree_btn.click()
+
+                                pop = await BrowserUtils.detect_antibot_popup(page, timeout_seconds=2)
+                                if pop:
+                                    raise Exception(f"IP_BANNED: {pop}")
                                 
                                 back_btn = page.locator("button.back[data-locale='back_to_inbox']")
                                 if await back_btn.is_visible(timeout=10000):
@@ -448,12 +516,28 @@ class AutomationApp(ctk.CTk):
                             except Exception as e:
                                 Logger.error(thread_id, f"Error: {e}")
                                 failed_reason = str(e)
-                                if context: await context.close()
+                                if context:
+                                    await context.close()
+
+                                # Timeout => bỏ qua email hiện tại (không retry / không rotate)
+                                if "Timeout" in failed_reason:
+                                    failed_reason = "TIMEOUT"
+                                    break
+
+                                # Không retry các lỗi không thể cứu bằng đổi IP
+                                if "NO_CODE" in failed_reason:
+                                    break
+                                if "EMAIL_TAKEN" in failed_reason:
+                                    break
+                                if "SMS_SPAM_LIMIT" in failed_reason:
+                                    break
+                                if "Get Phone Failed" in failed_reason:
+                                    break
                                 
                                 # Rotate IP if needed
-                                if "Timeout" in str(e) or "IP_BANNED" in str(e):
+                                if "IP_BANNED" in str(e):
                                     self.update_row_status(item_id, "Rotating IP...", phone_number)
-                                    await ProxyManager.rotate_ip(port, thread_id=thread_id)
+                                    await ProxyManager.ensure_rotated_ip(port, thread_id=thread_id, force_rotate=True)
                                     await BrowserUtils.random_sleep(3, 5)
 
                         if not isOk:

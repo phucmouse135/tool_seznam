@@ -1,3 +1,16 @@
+## SET UP 9PROXY
+
+### Tool proxy (Auto Refresh Proxy)
+
+1. Mở **Auto Refresh Proxy**.
+2. Điều chỉnh **Delay**: `5–10s`.
+3. Bật **Turn on**.
+4. Vào **Port configuration**.
+5. **Tích ALL port**.
+    - Cần bao nhiêu luồng (threads) thì tạo bấy nhiêu port.
+6. **Apply country**: chọn `CZ`.
+7. Click **Apply**.
+8. Click **Save changes**.
 
 ## Yêu cầu xoay IP trước tác vụ
 

@@ -5,3 +5,4 @@ customtkinter
 packaging
 requests
 playwright-stealth
+dotenv

@@ -130,21 +130,19 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         
                         # <div class="alert" style="left: 680px; top: 259px;"><p>Registrace nebyla dokončena z důvodu prevence hromadných/robotických registrací. Zkuste registraci zopakovat později.</p><div><button type="submit">Rozumím</button></div></div>
                         pop_up_locator = page.locator("div.alert")
-                        if await pop_up_locator.is_visible(timeout=5000):
+                        if await pop_up_locator.is_visible(timeout=10000):
                             pop_up_text = await pop_up_locator.inner_text()
                             Logger.error(thread_id, f"⚠️ Phát hiện pop-up lỗi: {pop_up_text}")
                             failed_reason = "IP_BANNED"
                             raise Exception(f"IP_BANNED: {pop_up_text}")
-                        await BrowserUtils.random_sleep(1,2)
                         
                         # xuat hien error khong hop le tren form Bylo posláno příliš SMS. Další lze odeslat za 24h.
                         error_locator = page.locator("div.error")
-                        if await error_locator.is_visible(timeout=5000):
+                        if await error_locator.is_visible(timeout=10000):
                             error_text = await error_locator.inner_text()
                             Logger.error(thread_id, f"⚠️ Phát hiện lỗi form: {error_text}")
                             failed_reason = "SMS_SPAM_LIMIT"
                             raise Exception(f"SMS_SPAM_LIMIT: {error_text}")
-                        await BrowserUtils.random_sleep(1,2)
                         
                         # dien code xac minh 
                         print("Chờ nhận code xác minh...")
@@ -206,6 +204,10 @@ async def worker(thread_id, port, semaphore, data_chunk):
                             failed_reason = "NO_CODE"
                             # Không cần retry nữa, lỗi này không khắc phục được bằng cách đổi IP
                             break
+                    
+                        if "SMS_SPAM_LIMIT" in str(e): 
+                            failed_reason = "SMS_SPAM_LIMIT"
+                            break
 
                         # --- [FIX 3] LOGIC ĐỔI IP KHI LỖI ---
                         if "Timeout" in str(e) or "IP_BANNED" in str(e) or "Target closed" in str(e):
@@ -250,6 +252,10 @@ async def main():
     for i in range(len(data_chunks)):
         # Port tịnh tiến: 60000, 60001...
         port = base_port + i
+        Logger.info(f"Đổi IP cho port {port}")
+        await ProxyManager.rotate_ip(port, thread_id=i)
+        await BrowserUtils.random_sleep(2,4)
+        Logger.info(f"Đổi IP xong cho port {port}")
         # Gán nhiệm vụ
         tasks.append(worker(i+1, port, semaphore, data_chunks[i]))  
     

@@ -129,7 +129,7 @@ async def worker(thread_id, port, semaphore, data_chunk):
                         await BrowserUtils.random_sleep(1,2)
                         
                         # <div class="alert" style="left: 680px; top: 259px;"><p>Registrace nebyla dokončena z důvodu prevence hromadných/robotických registrací. Zkuste registraci zopakovat později.</p><div><button type="submit">Rozumím</button></div></div>
-                        pop_up_locator = page.locator("div.alert")
+                        pop_up_locator = page.locator("div.alert", has_text="Registration not completed due to prevent mass/robot registrations. Please try registering again later.")
                         if await pop_up_locator.is_visible(timeout=10000):
                             pop_up_text = await pop_up_locator.inner_text()
                             Logger.error(thread_id, f"⚠️ Phát hiện pop-up lỗi: {pop_up_text}")
@@ -137,7 +137,7 @@ async def worker(thread_id, port, semaphore, data_chunk):
                             raise Exception(f"IP_BANNED: {pop_up_text}")
                         
                         # xuat hien error khong hop le tren form Bylo posláno příliš SMS. Další lze odeslat za 24h.
-                        error_locator = page.locator("div.error")
+                        error_locator = page.locator("div.error", has_text="Too many SMS have been sent. You can send another one in 24 hours.")
                         if await error_locator.is_visible(timeout=10000):
                             error_text = await error_locator.inner_text()
                             Logger.error(thread_id, f"⚠️ Phát hiện lỗi form: {error_text}")
